@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
@@ -12,23 +12,18 @@
         <div class="auth-box">
             <h1>SkaryChat</h1>
             <p class="subtitle">by Vitaly</p>
-            
             <div class="tabs">
                 <button class="tab active" onclick="switchTab('login')">Вход</button>
                 <button class="tab" onclick="switchTab('register')">Регистрация</button>
             </div>
-            
-            <!-- ВХОД -->
             <div id="login-form" class="form active">
-                <input type="text" id="login-username" placeholder="Логин">
+                <input type="text" id="login-username" placeholder="Юзернейм">
                 <input type="password" id="login-password" placeholder="Пароль">
                 <button onclick="login()">Войти</button>
                 <p id="login-error" class="error"></p>
             </div>
-            
-            <!-- РЕГИСТРАЦИЯ -->
             <div id="register-form" class="form">
-                <input type="text" id="register-username" placeholder="Логин">
+                <input type="text" id="register-username" placeholder="Юзернейм (от 4 символов)">
                 <input type="password" id="register-password" placeholder="Пароль">
                 <button onclick="register()">Зарегистрироваться</button>
                 <p id="register-error" class="error"></p>
@@ -38,29 +33,41 @@
     
     <!-- ЭКРАН ЧАТА -->
     <div id="chat-screen" class="screen">
-        <!-- Сайдбар -->
         <div class="sidebar">
             <div class="sidebar-header">
                 <h2>SkaryChat</h2>
-                <button onclick="logout()" class="logout-btn">Выйти</button>
+                <div class="header-buttons">
+                    <button onclick="toggleTheme()" class="icon-btn" id="theme-btn" title="Тема">🌙</button>
+                    <button onclick="showProfile()" class="icon-btn" title="Профиль">👤</button>
+                    <button onclick="logout()" class="logout-btn">Выйти</button>
+                </div>
             </div>
             <div class="user-info">
+                <img id="my-avatar" class="avatar" src="" alt="">
                 <span id="current-user"></span>
             </div>
             <div class="chats-header">
                 <span>Чаты</span>
-                <button onclick="showNewChat()" class="new-chat-btn">+</button>
+                <div>
+                    <button onclick="showNewChat()" class="new-chat-btn" title="Новый чат">+</button>
+                    <button onclick="showPublicChats()" class="new-chat-btn" title="Каналы">🔍</button>
+                </div>
             </div>
             <div id="chats-list" class="chats-list"></div>
         </div>
         
-        <!-- Область чата -->
         <div class="chat-area">
             <div id="chat-header" class="chat-header">
                 <h3 id="chat-name">Выбери чат</h3>
+                <div class="search-box">
+                    <input type="text" id="search-input" placeholder="Поиск..." oninput="searchMessages()">
+                </div>
             </div>
             <div id="messages" class="messages"></div>
             <div class="message-input">
+                <button onclick="document.getElementById('image-input').click()" class="attach-btn" title="Фото">📎</button>
+                <input type="file" id="image-input" accept="image/*" style="display:none" onchange="uploadImage(this)">
+                <button id="record-btn" onclick="toggleRecord()" class="attach-btn" title="Голосовое">🎤</button>
                 <input type="text" id="message-text" placeholder="Написать сообщение..." onkeypress="if(event.key==='Enter') sendMessage()">
                 <button onclick="sendMessage()">Отправить</button>
             </div>
@@ -71,11 +78,43 @@
     <div id="new-chat-modal" class="modal">
         <div class="modal-content">
             <h3>Новый чат</h3>
-            <input type="text" id="new-chat-name" placeholder="Название чата">
+            <input type="text" id="new-chat-name" placeholder="Название">
+            <label class="checkbox-label">
+                <input type="checkbox" id="new-chat-channel">
+                <span>Сделать каналом (публичный)</span>
+            </label>
+            <p class="hint">Участники (необязательно):</p>
             <div id="users-list" class="users-list"></div>
             <div class="modal-buttons">
                 <button onclick="createChat()">Создать</button>
                 <button onclick="closeNewChat()" class="cancel">Отмена</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- МОДАЛКА ПРОФИЛЯ -->
+    <div id="profile-modal" class="modal">
+        <div class="modal-content">
+            <h3>Профиль</h3>
+            <div class="profile-avatar">
+                <img id="profile-avatar" class="avatar-large" src="" alt="">
+                <input type="file" id="avatar-input" accept="image/*" style="display:none" onchange="uploadAvatar(this)">
+                <button onclick="document.getElementById('avatar-input').click()" class="change-avatar-btn">Сменить аватар</button>
+            </div>
+            <p id="profile-username"></p>
+            <div class="modal-buttons">
+                <button onclick="closeProfile()" class="cancel">Закрыть</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- МОДАЛКА ПУБЛИЧНЫХ КАНАЛОВ -->
+    <div id="public-chats-modal" class="modal">
+        <div class="modal-content">
+            <h3>Публичные каналы</h3>
+            <div id="public-chats-list" class="users-list"></div>
+            <div class="modal-buttons">
+                <button onclick="closePublicChats()" class="cancel">Закрыть</button>
             </div>
         </div>
     </div>
