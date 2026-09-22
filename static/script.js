@@ -5,29 +5,24 @@ let currentUser = null;
 let currentChat = null;
 let ws = null;
 
-// ============ API ============
 const API = '';
 
 async function api(path, method = 'GET', body = null) {
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    
     const options = { method, headers };
     if (body) options.body = JSON.stringify(body);
-    
     const response = await fetch(API + path, options);
     if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.detail || 'Ошибка');
+        throw new Error(error.detail || 'Error');
     }
     return response.json();
 }
 
-// ============ АВТОРИЗАЦИЯ ============
 function switchTab(tab) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.form').forEach(f => f.classList.remove('active'));
-    
     event.target.classList.add('active');
     document.getElementById(tab + '-form').classList.add('active');
 }
@@ -36,7 +31,6 @@ async function register() {
     const username = document.getElementById('register-username').value;
     const password = document.getElementById('register-password').value;
     const errorEl = document.getElementById('register-error');
-    
     try {
         const data = await api('/api/register', 'POST', { username, password });
         token = data.token;
@@ -53,7 +47,6 @@ async function login() {
     const username = document.getElementById('login-username').value;
     const password = document.getElementById('login-password').value;
     const errorEl = document.getElementById('login-error');
-    
     try {
         const data = await api('/api/login', 'POST', { username, password });
         token = data.token;
@@ -75,7 +68,6 @@ function logout() {
     location.reload();
 }
 
-// ============ ЭКРАНЫ ============
 function showChatScreen() {
     document.getElementById('auth-screen').classList.remove('active');
     document.getElementById('chat-screen').classList.add('active');
@@ -84,15 +76,12 @@ function showChatScreen() {
     connectWebSocket();
 }
 
-// ============ WEBSOCKET ============
 function connectWebSocket() {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${location.host}/ws`);
-    
     ws.onopen = () => {
         ws.send(JSON.stringify({ type: 'auth', token }));
     };
-    
     ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
         if (msg.type === 'message') {
@@ -101,19 +90,16 @@ function connectWebSocket() {
             }
         }
     };
-    
     ws.onclose = () => {
         setTimeout(connectWebSocket, 3000);
     };
 }
 
-// ============ ЧАТЫ ============
 async function loadChats() {
     try {
         const chats = await api('/api/chats');
         const list = document.getElementById('chats-list');
         list.innerHTML = '';
-        
         chats.forEach(chat => {
             const item = document.createElement('div');
             item.className = 'chat-item';
@@ -132,14 +118,28 @@ async function loadChats() {
 async function openChat(chat) {
     currentChat = chat;
     document.getElementById('chat-name').textContent = chat.name;
-    
     document.querySelectorAll('.chat-item').forEach(i => i.classList.remove('active'));
     event.target.closest('.chat-item').classList.add('active');
     
-    const messages = await api(`/api/messages/${chat.id}`);
-    const container = document.getElementById('messages');
-    container.innerHTML = '';
-    messages.forEach(addMessage);
+    await refreshMessages();
+    
+    // Автообновление каждые 3 секунды
+    if (window.chatInterval) clearInterval(window.chatInterval);
+    window.chatInterval = setInterval(refreshMessages, 3000);
+}
+
+async function refreshMessages() {
+    if (!currentChat) return;
+    try {
+        const messages = await api(`/api/messages/${currentChat.id}`);
+        const container = document.getElementById('messages');
+        const wasAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 50;
+        container.innerHTML = '';
+        messages.forEach(addMessage);
+        if (wasAtBottom) container.scrollTop = container.scrollHeight;
+    } catch (e) {
+        console.error(e);
+    }
 }
 
 function addMessage(msg) {
@@ -161,29 +161,25 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// ============ СООБЩЕНИЯ ============
 async function sendMessage() {
     const input = document.getElementById('message-text');
     const text = input.value.trim();
     if (!text || !currentChat) return;
-    
     try {
         await api('/api/messages', 'POST', { chat_id: currentChat.id, text });
         input.value = '';
+        await refreshMessages();
     } catch (e) {
         console.error(e);
     }
 }
 
-// ============ НОВЫЙ ЧАТ ============
 async function showNewChat() {
     const modal = document.getElementById('new-chat-modal');
     modal.classList.add('active');
-    
     const users = await api('/api/users');
     const list = document.getElementById('users-list');
     list.innerHTML = '';
-    
     users.forEach(user => {
         const item = document.createElement('div');
         item.className = 'user-item';
@@ -209,12 +205,10 @@ async function createChat() {
     const name = document.getElementById('new-chat-name').value.trim();
     const members = Array.from(document.querySelectorAll('#users-list input:checked'))
         .map(i => parseInt(i.value));
-    
     if (!name || members.length === 0) {
-        alert('Введи название и выбери участников');
+        alert('Enter name and select members');
         return;
     }
-    
     try {
         await api('/api/chats', 'POST', { name, members });
         closeNewChat();
@@ -224,7 +218,6 @@ async function createChat() {
     }
 }
 
-// ============ ИНИЦИАЛИЗАЦИЯ ============
 window.onload = () => {
     const savedUser = localStorage.getItem('skarychat_user');
     if (token && savedUser) {
