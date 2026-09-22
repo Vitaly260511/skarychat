@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkaryChat</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- ЭКРАН ВХОДА -->
+    <div id="auth-screen" class="screen active">
+        <div class="auth-box">
+            <h1>SkaryChat</h1>
+            <p class="subtitle">by Vitaly</p>
+            
+            <div class="tabs">
+                <button class="tab active" onclick="switchTab('login')">Вход</button>
+                <button class="tab" onclick="switchTab('register')">Регистрация</button>
+            </div>
+            
+            <!-- ВХОД -->
+            <div id="login-form" class="form active">
+                <input type="text" id="login-username" placeholder="Логин">
+                <input type="password" id="login-password" placeholder="Пароль">
+                <button onclick="login()">Войти</button>
+                <p id="login-error" class="error"></p>
+            </div>
+            
+            <!-- РЕГИСТРАЦИЯ -->
+            <div id="register-form" class="form">
+                <input type="text" id="register-username" placeholder="Логин">
+                <input type="password" id="register-password" placeholder="Пароль">
+                <button onclick="register()">Зарегистрироваться</button>
+                <p id="register-error" class="error"></p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- ЭКРАН ЧАТА -->
+    <div id="chat-screen" class="screen">
+        <!-- Сайдбар -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>SkaryChat</h2>
+                <button onclick="logout()" class="logout-btn">Выйти</button>
+            </div>
+            <div class="user-info">
+                <span id="current-user"></span>
+            </div>
+            <div class="chats-header">
+                <span>Чаты</span>
+                <button onclick="showNewChat()" class="new-chat-btn">+</button>
+            </div>
+            <div id="chats-list" class="chats-list"></div>
+        </div>
+        
+        <!-- Область чата -->
+        <div class="chat-area">
+            <div id="chat-header" class="chat-header">
+                <h3 id="chat-name">Выбери чат</h3>
+            </div>
+            <div id="messages" class="messages"></div>
+            <div class="message-input">
+                <input type="text" id="message-text" placeholder="Написать сообщение..." onkeypress="if(event.key==='Enter') sendMessage()">
+                <button onclick="sendMessage()">Отправить</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- МОДАЛКА НОВОГО ЧАТА -->
+    <div id="new-chat-modal" class="modal">
+        <div class="modal-content">
+            <h3>Новый чат</h3>
+            <input type="text" id="new-chat-name" placeholder="Название чата">
+            <div id="users-list" class="users-list"></div>
+            <div class="modal-buttons">
+                <button onclick="createChat()">Создать</button>
+                <button onclick="closeNewChat()" class="cancel">Отмена</button>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/script.js"></script>
+</body>
+</html>
