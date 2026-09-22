@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
+п»їfrom fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -56,7 +55,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     user = c.fetchone()
     conn.close()
     if not user:
-        raise HTTPException(status_code=401, detail="еавторизован")
+        raise HTTPException(status_code=401, detail="Unauthorized")
     return {"id": user[0], "username": user[1]}
 
 class ConnectionManager:
@@ -103,7 +102,7 @@ async def register(data: RegisterModel):
     c.execute("SELECT id FROM users WHERE username = ?", (data.username,))
     if c.fetchone():
         conn.close()
-        raise HTTPException(status_code=400, detail="ользователь уже существует")
+        raise HTTPException(status_code=400, detail="User already exists")
     token = secrets.token_hex(32)
     password_hash = hash_password(data.password)
     c.execute("INSERT INTO users (username, password_hash, token) VALUES (?, ?, ?)", (data.username, password_hash, token))
@@ -121,7 +120,7 @@ async def login(data: LoginModel):
     user = c.fetchone()
     if not user:
         conn.close()
-        raise HTTPException(status_code=401, detail="еверный логин или пароль")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     new_token = secrets.token_hex(32)
     c.execute("UPDATE users SET token = ? WHERE id = ?", (new_token, user[0]))
     conn.commit()
@@ -170,7 +169,7 @@ async def get_messages(chat_id: int, user: dict = Depends(get_current_user)):
     c.execute("SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user["id"]))
     if not c.fetchone():
         conn.close()
-        raise HTTPException(status_code=403, detail="ет доступа")
+        raise HTTPException(status_code=403, detail="Access denied")
     c.execute('''SELECT m.id, m.user_id, u.username, m.text, m.image, m.created_at FROM messages m JOIN users u ON m.user_id = u.id WHERE m.chat_id = ? ORDER BY m.created_at ASC LIMIT 100''', (chat_id,))
     messages = [{"id": m[0], "user_id": m[1], "username": m[2], "text": m[3], "image": m[4], "created_at": m[5]} for m in c.fetchall()]
     conn.close()
@@ -183,7 +182,7 @@ async def send_message(data: MessageModel, user: dict = Depends(get_current_user
     c.execute("SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?", (data.chat_id, user["id"]))
     if not c.fetchone():
         conn.close()
-        raise HTTPException(status_code=403, detail="ет доступа")
+        raise HTTPException(status_code=403, detail="Access denied")
     c.execute("INSERT INTO messages (chat_id, user_id, text, image) VALUES (?, ?, ?, ?)", (data.chat_id, user["id"], data.text, data.image))
     message_id = c.lastrowid
     conn.commit()
