@@ -9,6 +9,11 @@ from typing import Dict, List, Optional
 import sqlite3, hashlib, secrets, json, os, shutil, uuid
 from datetime import datetime
 
+# СНАЧАЛА создаём папки
+os.makedirs("uploads/avatars", exist_ok=True)
+os.makedirs("uploads/images", exist_ok=True)
+os.makedirs("uploads/audio", exist_ok=True)
+
 app = FastAPI(title="SkaryChat")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
@@ -16,10 +21,6 @@ templates = Jinja2Templates(directory="templates")
 security = HTTPBearer()
 DB_PATH = "skarychat.db"
 SECRET_KEY = secrets.token_hex(32)
-
-os.makedirs("uploads/avatars", exist_ok=True)
-os.makedirs("uploads/images", exist_ok=True)
-os.makedirs("uploads/audio", exist_ok=True)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
