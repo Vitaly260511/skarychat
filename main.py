@@ -1,390 +1,549 @@
-﻿# -*- coding: utf-8 -*-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, UploadFile, File
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+﻿from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import Dict, List, Optional
-import sqlite3, hashlib, secrets, json, os, shutil, uuid
-from datetime import datetime
+from typing import Optional, List
+from datetime import datetime, timedelta
+import sqlite3
+import hashlib
+import secrets
+import os
+import shutil
 
-# СНАЧАЛА создаём папки
-os.makedirs("uploads/avatars", exist_ok=True)
-os.makedirs("uploads/images", exist_ok=True)
-os.makedirs("uploads/audio", exist_ok=True)
+app = FastAPI(title="NEXUSCHAT", version="1.0.0")
 
-app = FastAPI(title="SkaryChat")
-app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-templates = Jinja2Templates(directory="templates")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DB_PATH = "nexuschat.db"
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 security = HTTPBearer()
-DB_PATH = "skarychat.db"
-SECRET_KEY = secrets.token_hex(32)
+
+# ============ БАЗА ДАННЫХ ============
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        token TEXT,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        bio TEXT DEFAULT '',
         avatar TEXT DEFAULT '',
         theme TEXT DEFAULT 'dark',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS chats (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        is_group INTEGER DEFAULT 0,
+        name TEXT NOT NULL,
+        username TEXT UNIQUE,
         is_channel INTEGER DEFAULT 0,
-        owner_id INTEGER,
+        owner_id INTEGER NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS chat_members (
         chat_id INTEGER,
         user_id INTEGER,
-        role TEXT DEFAULT 'member',
-        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (chat_id, user_id)
     )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER,
-        user_id INTEGER,
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
         text TEXT,
+        voice TEXT,
         image TEXT,
-        audio TEXT,
+        reply_to INTEGER,
+        edited INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS reactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        emoji TEXT NOT NULL
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS email_codes (
+        email TEXT PRIMARY KEY,
+        code TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
     conn.commit()
     conn.close()
 
 init_db()
 
+# ============ ХЕЛПЕРЫ ============
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def get_user_by_token(token: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM sessions WHERE token = ?", (token,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return row[0]
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    user_id = get_user_by_token(credentials.credentials)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    return user_id
+
+# ============ МОДЕЛИ ============
+
 class RegisterModel(BaseModel):
     username: str
+    email: str
     password: str
 
 class LoginModel(BaseModel):
-    username: str
+    email: str
     password: str
 
-class MessageModel(BaseModel):
-    chat_id: int
-    text: str
-    image: Optional[str] = None
-    audio: Optional[str] = None
+class VerifyEmailModel(BaseModel):
+    email: str
+    code: str
+
+class ProfileModel(BaseModel):
+    username: Optional[str] = None
+    email: Optional[str] = None
+    bio: Optional[str] = None
 
 class ChatModel(BaseModel):
     name: str
-    members: List[int] = []
+    username: Optional[str] = None
     is_channel: bool = False
+    members: List[int] = []
+
+class MessageModel(BaseModel):
+    chat_id: int
+    text: Optional[str] = None
+    reply_to: Optional[int] = None
+
+class ReactionModel(BaseModel):
+    emoji: str
 
 class ThemeModel(BaseModel):
     theme: str
 
-class JoinModel(BaseModel):
-    chat_id: int
+# ============ АВТОРИЗАЦИЯ ============
 
-def hash_password(password: str) -> str:
-    return hashlib.sha256((password + SECRET_KEY).encode()).hexdigest()
+@app.get("/")
+def index():
+    return {"status": "ok", "service": "NEXUSCHAT"}
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
+@app.post("/api/send-code")
+def send_code(data: dict):
+    """Отправка кода на почту"""
+    email = data.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Введи почту")
+    
+    code = str(secrets.randbelow(1000000)).zfill(6)
+    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, username, avatar, theme FROM users WHERE token = ?", (token,))
-    user = c.fetchone()
+    c.execute("INSERT OR REPLACE INTO email_codes (email, code) VALUES (?, ?)", (email, code))
+    conn.commit()
     conn.close()
-    if not user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return {"id": user[0], "username": user[1], "avatar": user[2], "theme": user[3]}
+    
+    # В реальном приложении тут отправка на почту
+    # Для теста возвращаем код
+    return {"status": "ok", "code": code, "message": "Код отправлен"}
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: Dict[int, List[WebSocket]] = {}
-    async def connect(self, user_id: int, websocket: WebSocket):
-        await websocket.accept()
-        if user_id not in self.active_connections:
-            self.active_connections[user_id] = []
-        self.active_connections[user_id].append(websocket)
-    def disconnect(self, user_id: int, websocket: WebSocket):
-        if user_id in self.active_connections:
-            if websocket in self.active_connections[user_id]:
-                self.active_connections[user_id].remove(websocket)
-            if not self.active_connections[user_id]:
-                del self.active_connections[user_id]
-    async def send_to_user(self, user_id: int, message: dict):
-        if user_id in self.active_connections:
-            for connection in self.active_connections[user_id]:
-                try:
-                    await connection.send_json(message)
-                except:
-                    pass
-    async def broadcast_to_chat(self, chat_id: int, message: dict):
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM chat_members WHERE chat_id = ?", (chat_id,))
-        members = c.fetchall()
-        conn.close()
-        for member in members:
-            await self.send_to_user(member[0], message)
-
-manager = ConnectionManager()
-
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    with open("templates/index.html", "r", encoding="utf-8") as f:
-        return f.read()
+@app.post("/api/verify-email")
+def verify_email(data: VerifyEmailModel):
+    """Подтверждение почты"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT code FROM email_codes WHERE email = ?", (data.email,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row or row[0] != data.code:
+        raise HTTPException(status_code=400, detail="Неверный код")
+    
+    return {"status": "ok", "message": "Почта подтверждена"}
 
 @app.post("/api/register")
-async def register(data: RegisterModel):
-    if len(data.username) < 4:
-        raise HTTPException(status_code=400, detail="Username must be at least 4 characters")
+def register(data: RegisterModel):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE username = ?", (data.username,))
-    if c.fetchone():
+    
+    try:
+        c.execute(
+            "INSERT INTO users (username, email, password) VALUES (?, ?, ?)",
+            (data.username, data.email, hash_password(data.password))
+        )
+        conn.commit()
+        user_id = c.lastrowid
+        
+        token = secrets.token_hex(32)
+        c.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
+        conn.commit()
+        
+        return {"status": "ok", "access_token": token, "user_id": user_id}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Пользователь уже существует")
+    finally:
         conn.close()
-        raise HTTPException(status_code=400, detail="Username already taken")
-    token = secrets.token_hex(32)
-    password_hash = hash_password(data.password)
-    c.execute("INSERT INTO users (username, password_hash, token) VALUES (?, ?, ?)", (data.username, password_hash, token))
-    user_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return {"token": token, "user_id": user_id, "username": data.username}
 
 @app.post("/api/login")
-async def login(data: LoginModel):
+def login(data: LoginModel):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    password_hash = hash_password(data.password)
-    c.execute("SELECT id, username, avatar, theme FROM users WHERE username = ? AND password_hash = ?", (data.username, password_hash))
-    user = c.fetchone()
-    if not user:
+    c.execute(
+        "SELECT id, username FROM users WHERE email = ? AND password = ?",
+        (data.email, hash_password(data.password))
+    )
+    row = c.fetchone()
+    
+    if not row:
         conn.close()
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    new_token = secrets.token_hex(32)
-    c.execute("UPDATE users SET token = ? WHERE id = ?", (new_token, user[0]))
+        raise HTTPException(status_code=401, detail="Неверная почта или пароль")
+    
+    user_id, username = row
+    
+    token = secrets.token_hex(32)
+    c.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
     conn.commit()
     conn.close()
-    return {"token": new_token, "user_id": user[0], "username": user[1], "avatar": user[2], "theme": user[3]}
+    
+    return {"status": "ok", "access_token": token, "user_id": user_id, "username": username}
+
+@app.post("/api/logout")
+def logout(user_id: int = Depends(get_current_user)):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
 
 @app.get("/api/me")
-async def get_me(user: dict = Depends(get_current_user)):
-    return user
+def get_me(user_id: int = Depends(get_current_user)):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, username, email, bio, avatar, theme FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    return {
+        "id": row[0],
+        "username": row[1],
+        "email": row[2],
+        "bio": row[3],
+        "avatar": row[4],
+        "theme": row[5]
+    }
+
+@app.post("/api/profile")
+def update_profile(data: ProfileModel, user_id: int = Depends(get_current_user)):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    if data.username:
+        c.execute("UPDATE users SET username = ? WHERE id = ?", (data.username, user_id))
+    if data.email:
+        c.execute("UPDATE users SET email = ? WHERE id = ?", (data.email, user_id))
+    if data.bio is not None:
+        c.execute("UPDATE users SET bio = ? WHERE id = ?", (data.bio, user_id))
+    
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
 
 @app.post("/api/theme")
-async def set_theme(data: ThemeModel, user: dict = Depends(get_current_user)):
+def set_theme(data: ThemeModel, user_id: int = Depends(get_current_user)):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("UPDATE users SET theme = ? WHERE id = ?", (data.theme, user["id"]))
+    c.execute("UPDATE users SET theme = ? WHERE id = ?", (data.theme, user_id))
     conn.commit()
     conn.close()
-    return {"theme": data.theme}
+    return {"status": "ok"}
 
-@app.post("/api/avatar")
-async def upload_avatar(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Only images allowed")
-    ext = file.filename.split(".")[-1]
-    filename = f"{uuid.uuid4()}.{ext}"
-    path = f"uploads/avatars/{filename}"
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    avatar_url = f"/uploads/avatars/{filename}"
+# ============ ПОИСК ============
+
+@app.get("/api/users/search")
+def search_users(q: str, user_id: int = Depends(get_current_user)):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("UPDATE users SET avatar = ? WHERE id = ?", (avatar_url, user["id"]))
-    conn.commit()
+    c.execute("SELECT id, username, bio, avatar FROM users WHERE username LIKE ? AND id != ?", (f"%{q}%", user_id))
+    rows = c.fetchall()
     conn.close()
-    return {"avatar": avatar_url}
+    
+    return [{"id": r[0], "username": r[1], "bio": r[2], "avatar": r[3]} for r in rows]
 
-@app.post("/api/upload/image")
-async def upload_image(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Only images allowed")
-    ext = file.filename.split(".")[-1]
-    filename = f"{uuid.uuid4()}.{ext}"
-    path = f"uploads/images/{filename}"
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    return {"url": f"/uploads/images/{filename}"}
-
-@app.post("/api/upload/audio")
-async def upload_audio(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    if not file.content_type.startswith("audio/"):
-        raise HTTPException(status_code=400, detail="Only audio allowed")
-    ext = file.filename.split(".")[-1]
-    filename = f"{uuid.uuid4()}.{ext}"
-    path = f"uploads/audio/{filename}"
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    return {"url": f"/uploads/audio/{filename}"}
-
-@app.get("/api/users")
-async def get_users(user: dict = Depends(get_current_user)):
+@app.get("/api/chats/search")
+def search_chats(q: str, user_id: int = Depends(get_current_user)):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, username, avatar FROM users WHERE id != ?", (user["id"],))
-    users = [{"id": u[0], "username": u[1], "avatar": u[2]} for u in c.fetchall()]
+    c.execute(
+        "SELECT id, name, username, is_channel FROM chats WHERE name LIKE ? OR username LIKE ?",
+        (f"%{q}%", f"%{q}%")
+    )
+    rows = c.fetchall()
     conn.close()
-    return users
+    
+    return [{"id": r[0], "name": r[1], "username": r[2], "is_channel": r[3]} for r in rows]
+
+# ============ ЧАТЫ ============
 
 @app.get("/api/chats")
-async def get_chats(user: dict = Depends(get_current_user)):
+def get_chats(user_id: int = Depends(get_current_user)):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''SELECT c.id, c.name, c.is_group, c.is_channel, c.owner_id 
-                 FROM chats c JOIN chat_members cm ON c.id = cm.chat_id 
-                 WHERE cm.user_id = ?''', (user["id"],))
-    chats = [{"id": ch[0], "name": ch[1], "is_group": bool(ch[2]), "is_channel": bool(ch[3]), "owner_id": ch[4]} for ch in c.fetchall()]
+    c.execute('''
+        SELECT c.id, c.name, c.username, c.is_channel,
+               (SELECT text FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_message,
+               (SELECT created_at FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_message_time
+        FROM chats c
+        JOIN chat_members cm ON c.id = cm.chat_id
+        WHERE cm.user_id = ?
+        ORDER BY last_message_time DESC
+    ''', (user_id,))
+    rows = c.fetchall()
     conn.close()
-    return chats
-
-@app.get("/api/public-chats")
-async def get_public_chats(user: dict = Depends(get_current_user)):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''SELECT c.id, c.name, c.is_group, c.is_channel, c.owner_id 
-                 FROM chats c 
-                 WHERE c.is_channel = 1 AND c.id NOT IN (SELECT chat_id FROM chat_members WHERE user_id = ?)''', (user["id"],))
-    chats = [{"id": ch[0], "name": ch[1], "is_group": bool(ch[2]), "is_channel": bool(ch[3]), "owner_id": ch[4]} for ch in c.fetchall()]
-    conn.close()
-    return chats
+    
+    return [{
+        "id": r[0],
+        "name": r[1],
+        "username": r[2],
+        "is_channel": r[3],
+        "last_message": r[4],
+        "last_message_time": r[5]
+    } for r in rows]
 
 @app.post("/api/chats")
-async def create_chat(data: ChatModel, user: dict = Depends(get_current_user)):
+def create_chat(data: ChatModel, user_id: int = Depends(get_current_user)):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    is_group = 1 if data.is_channel or len(data.members) > 1 else 0
-    c.execute("INSERT INTO chats (name, is_group, is_channel, owner_id) VALUES (?, ?, ?, ?)",
-              (data.name, is_group, 1 if data.is_channel else 0, user["id"]))
+    
+    c.execute(
+        "INSERT INTO chats (name, username, is_channel, owner_id) VALUES (?, ?, ?, ?)",
+        (data.name, data.username, 1 if data.is_channel else 0, user_id)
+    )
     chat_id = c.lastrowid
-    c.execute("INSERT INTO chat_members (chat_id, user_id, role) VALUES (?, ?, ?)", (chat_id, user["id"], "owner"))
+    
+    c.execute("INSERT INTO chat_members (chat_id, user_id) VALUES (?, ?)", (chat_id, user_id))
+    
     for member_id in data.members:
-        c.execute("INSERT INTO chat_members (chat_id, user_id) VALUES (?, ?)", (chat_id, member_id))
+        c.execute("INSERT OR IGNORE INTO chat_members (chat_id, user_id) VALUES (?, ?)", (chat_id, member_id))
+    
     conn.commit()
     conn.close()
-    return {"chat_id": chat_id, "name": data.name, "is_channel": data.is_channel}
+    
+    return {"status": "ok", "chat_id": chat_id}
 
-@app.post("/api/chats/join")
-async def join_chat(data: JoinModel, user: dict = Depends(get_current_user)):
+@app.get("/api/chats/{chat_id}")
+def get_chat_info(chat_id: int, user_id: int = Depends(get_current_user)):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?", (data.chat_id, user["id"]))
-    if c.fetchone():
-        conn.close()
-        raise HTTPException(status_code=400, detail="Already member")
-    c.execute("INSERT INTO chat_members (chat_id, user_id) VALUES (?, ?)", (data.chat_id, user["id"]))
-    conn.commit()
+    c.execute("SELECT id, name, username, is_channel, owner_id FROM chats WHERE id = ?", (chat_id,))
+    row = c.fetchone()
     conn.close()
-    return {"status": "joined"}
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+    
+    return {
+        "id": row[0],
+        "name": row[1],
+        "username": row[2],
+        "is_channel": row[3],
+        "owner_id": row[4]
+    }
+
+# ============ СООБЩЕНИЯ ============
 
 @app.get("/api/messages/{chat_id}")
-async def get_messages(chat_id: int, search: str = "", user: dict = Depends(get_current_user)):
+def get_messages(chat_id: int, user_id: int = Depends(get_current_user)):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user["id"]))
-    if not c.fetchone():
-        conn.close()
-        raise HTTPException(status_code=403, detail="Access denied")
-    if search:
-        c.execute('''SELECT m.id, m.user_id, u.username, u.avatar, m.text, m.image, m.audio, m.created_at 
-                     FROM messages m JOIN users u ON m.user_id = u.id 
-                     WHERE m.chat_id = ? AND m.text LIKE ? 
-                     ORDER BY m.created_at ASC LIMIT 100''', (chat_id, f"%{search}%"))
-    else:
-        c.execute('''SELECT m.id, m.user_id, u.username, u.avatar, m.text, m.image, m.audio, m.created_at 
-                     FROM messages m JOIN users u ON m.user_id = u.id 
-                     WHERE m.chat_id = ? ORDER BY m.created_at ASC LIMIT 100''', (chat_id,))
-    messages = [{
-        "id": m[0], "user_id": m[1], "username": m[2], "avatar": m[3],
-        "text": m[4], "image": m[5], "audio": m[6], "created_at": m[7]
-    } for m in c.fetchall()]
+    c.execute('''
+        SELECT m.id, m.user_id, u.username, m.text, m.voice, m.image,
+               m.reply_to, m.edited, m.created_at
+        FROM messages m
+        JOIN users u ON m.user_id = u.id
+        WHERE m.chat_id = ?
+        ORDER BY m.id ASC
+    ''', (chat_id,))
+    rows = c.fetchall()
+    
+    result = []
+    for r in rows:
+        msg_id = r[0]
+        
+        c.execute("SELECT emoji, COUNT(*) FROM reactions WHERE message_id = ? GROUP BY emoji", (msg_id,))
+        reactions = c.fetchall()
+        
+        result.append({
+            "id": r[0],
+            "user_id": r[1],
+            "username": r[2],
+            "text": r[3],
+            "voice": r[4],
+            "image": r[5],
+            "reply_to": r[6],
+            "edited": r[7],
+            "created_at": r[8],
+            "is_own": r[1] == user_id,
+            "reactions": [{"emoji": rr[0], "count": rr[1]} for rr in reactions]
+        })
+    
     conn.close()
-    return messages
+    return result
 
 @app.post("/api/messages")
-async def send_message(data: MessageModel, user: dict = Depends(get_current_user)):
+def send_message(data: MessageModel, user_id: int = Depends(get_current_user)):
+    if not data.text:
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
+    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?", (data.chat_id, user["id"]))
-    if not c.fetchone():
+    
+    c.execute(
+        "INSERT INTO messages (chat_id, user_id, text, reply_to) VALUES (?, ?, ?, ?)",
+        (data.chat_id, user_id, data.text, data.reply_to)
+    )
+    message_id = c.lastrowid
+    
+    conn.commit()
+    conn.close()
+    
+    return {"status": "ok", "message_id": message_id}
+
+@app.post("/api/messages/{message_id}/edit")
+def edit_message(message_id: int, data: dict, user_id: int = Depends(get_current_user)):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute("SELECT user_id FROM messages WHERE id = ?", (message_id,))
+    row = c.fetchone()
+    
+    if not row or row[0] != user_id:
         conn.close()
-        raise HTTPException(status_code=403, detail="Access denied")
-    c.execute("INSERT INTO messages (chat_id, user_id, text, image, audio) VALUES (?, ?, ?, ?, ?)",
-              (data.chat_id, user["id"], data.text, data.image, data.audio))
+        raise HTTPException(status_code=403, detail="Не твоё сообщение")
+    
+    c.execute("UPDATE messages SET text = ?, edited = 1 WHERE id = ?", (data.get("text"), message_id))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "ok"}
+
+@app.post("/api/messages/{message_id}/delete")
+def delete_message(message_id: int, user_id: int = Depends(get_current_user)):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute("SELECT user_id FROM messages WHERE id = ?", (message_id,))
+    row = c.fetchone()
+    
+    if not row or row[0] != user_id:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Не твоё сообщение")
+    
+    c.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    c.execute("DELETE FROM reactions WHERE message_id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "ok"}
+
+@app.post("/api/messages/{message_id}/reaction")
+def add_reaction(message_id: int, data: ReactionModel, user_id: int = Depends(get_current_user)):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute("SELECT id FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?",
+              (message_id, user_id, data.emoji))
+    if c.fetchone():
+        c.execute("DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?",
+                  (message_id, user_id, data.emoji))
+    else:
+        c.execute("INSERT INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)",
+                  (message_id, user_id, data.emoji))
+    
+    conn.commit()
+    conn.close()
+    
+    return {"status": "ok"}
+
+# ============ ГОЛОСОВЫЕ ============
+
+@app.post("/api/messages/{chat_id}/voice")
+async def send_voice(chat_id: int, file: UploadFile = File(...), user_id: int = Depends(get_current_user)):
+    filename = f"voice_{user_id}_{secrets.token_hex(8)}.webm"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO messages (chat_id, user_id, voice) VALUES (?, ?, ?)",
+        (chat_id, user_id, filename)
+    )
     message_id = c.lastrowid
     conn.commit()
-    c.execute('''SELECT m.id, m.user_id, u.username, u.avatar, m.text, m.image, m.audio, m.created_at 
-                 FROM messages m JOIN users u ON m.user_id = u.id WHERE m.id = ?''', (message_id,))
-    msg = c.fetchone()
     conn.close()
-    message = {
-        "id": msg[0], "user_id": msg[1], "username": msg[2], "avatar": msg[3],
-        "text": msg[4], "image": msg[5], "audio": msg[6], "created_at": msg[7],
-        "chat_id": data.chat_id
-    }
-    await manager.broadcast_to_chat(data.chat_id, {"type": "message", "data": message})
-    return message
+    
+    return {"status": "ok", "message_id": message_id, "voice": filename}
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    user_id = None
-    try:
-        data = await websocket.receive_text()
-        msg = json.loads(data)
-        if msg.get("type") == "auth":
-            token = msg.get("token")
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT id FROM users WHERE token = ?", (token,))
-            user = c.fetchone()
-            conn.close()
-            if user:
-                user_id = user[0]
-                await manager.connect(user_id, websocket)
-                await websocket.send_json({"type": "auth_ok"})
-            else:
-                await websocket.send_json({"type": "auth_error"})
-                await websocket.close()
-                return
-        while True:
-            data = await websocket.receive_text()
-            msg = json.loads(data)
-            if msg.get("type") == "message":
-                chat_id = msg.get("chat_id")
-                text = msg.get("text")
-                image = msg.get("image")
-                audio = msg.get("audio")
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
-                if c.fetchone():
-                    c.execute("INSERT INTO messages (chat_id, user_id, text, image, audio) VALUES (?, ?, ?, ?, ?)",
-                              (chat_id, user_id, text, image, audio))
-                    message_id = c.lastrowid
-                    conn.commit()
-                    c.execute('''SELECT m.id, m.user_id, u.username, u.avatar, m.text, m.image, m.audio, m.created_at 
-                                 FROM messages m JOIN users u ON m.user_id = u.id WHERE m.id = ?''', (message_id,))
-                    m = c.fetchone()
-                    message = {
-                        "id": m[0], "user_id": m[1], "username": m[2], "avatar": m[3],
-                        "text": m[4], "image": m[5], "audio": m[6], "created_at": m[7],
-                        "chat_id": chat_id
-                    }
-                    await manager.broadcast_to_chat(chat_id, {"type": "message", "data": message})
-                conn.close()
-    except WebSocketDisconnect:
-        if user_id:
-            manager.disconnect(user_id, websocket)
+# ============ ЗАГРУЗКА ФАЙЛОВ ============
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.post("/api/upload/image")
+async def upload_image(file: UploadFile = File(...), user_id: int = Depends(get_current_user)):
+    filename = f"image_{user_id}_{secrets.token_hex(8)}_{file.filename}"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    return {"status": "ok", "filename": filename}
+
+@app.post("/api/avatar")
+async def upload_avatar(file: UploadFile = File(...), user_id: int = Depends(get_current_user)):
+    filename = f"avatar_{user_id}_{secrets.token_hex(8)}_{file.filename}"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET avatar = ? WHERE id = ?", (filename, user_id))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "ok", "filename": filename}
