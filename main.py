@@ -9,6 +9,8 @@ import hashlib
 import secrets
 import os
 import shutil
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 app = FastAPI(title="NEXUSCHAT", version="1.0.0")
 
@@ -173,9 +175,35 @@ def send_code(data: dict):
     conn.commit()
     conn.close()
     
-    # В реальном приложении тут отправка на почту
-    # Для теста возвращаем код
-    return {"status": "ok", "code": code, "message": "Код отправлен"}
+    # Отправка через SendGrid
+    try:
+        message = Mail(
+            from_email='ginifrost780@gmail.com',
+            to_emails=email,
+            subject='NEXUSCHAT - Код подтверждения',
+            html_content=f'''
+            <div style="font-family: Arial, sans-serif; background: #17212B; padding: 40px; border-radius: 20px; max-width: 500px; margin: 0 auto;">
+                <h1 style="color: #2AABEE; text-align: center; font-size: 32px;">NEXUSCHAT</h1>
+                <p style="color: #FFF; text-align: center; font-size: 18px;">Ваш код подтверждения:</p>
+                <h2 style="color: #2AABEE; text-align: center; font-size: 48px; letter-spacing: 10px; margin: 30px 0;">{code}</h2>
+                <p style="color: #708499; text-align: center; font-size: 14px;">Если вы не запрашивали код — проигнорируйте это письмо.</p>
+            </div>
+            '''
+        )
+        
+        api_key = os.environ.get('SENDGRID_API_KEY', '')
+        if not api_key:
+            print("ОШИБКА: SENDGRID_API_KEY не найден в переменных окружения!")
+            raise HTTPException(status_code=500, detail="SENDGRID_API_KEY не настроен")
+        
+        sg = SendGridAPIClient(api_key)
+        response = sg.send(message)
+        
+        print(f"Письмо отправлено на {email}, статус: {response.status_code}")
+        return {"status": "ok", "message": "Код отправлен на почту"}
+    except Exception as e:
+        print(f"Ошибка отправки: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка отправки: {str(e)}")
 
 @app.post("/api/verify-email")
 def verify_email(data: VerifyEmailModel):
